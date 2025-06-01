@@ -1,8 +1,16 @@
 {
-  "name": "WUMP Daily Bot",
+  "name": "wump-bot",
   "version": "1.0.0",
+  "description": "A bot for interacting with the WUMP API",
+  "main": "index.js",
+  "scripts": {
+    "start": "node wump.js"
+  },
+  "author": "ADB NODE",
+  "license": "MIT",
   "dependencies": {
     "axios": "^1.7.7",
-    "user-agents": "^1.1.43"
+    "https-proxy-agent": "^7.0.5",
+    "socks-proxy-agent": "^8.0.4"
   }
 }
