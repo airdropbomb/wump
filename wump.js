@@ -72,7 +72,7 @@ class WUMPBot {
 \x1b[0m\x1b[34m\x1b[1m
         WUMP - BOT
 \x1b[0m\x1b[33m\x1b[1m
-        github.com/robprian
+        github.com/airdropbomb
 \x1b[0m`);
     }
 
