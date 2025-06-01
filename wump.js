@@ -1,9 +1,7 @@
+const fs = require('fs').promises;
 const axios = require('axios');
 const { HttpsProxyAgent } = require('https-proxy-agent');
 const { SocksProxyAgent } = require('socks-proxy-agent');
-const fs = require('fs').promises;
-const path = require('path');
-const crypto = require('crypto');
 const os = require('os');
 
 class WUMPBot {
@@ -29,7 +27,7 @@ class WUMPBot {
         this.userIds = new Map();
         this.lastProxyRefresh = 0;
         this.proxyRefreshInterval = 30 * 60 * 1000; // 30 minutes
-        
+
         // Auto refresh proxies every 30 minutes
         setInterval(() => {
             this.loadProxies();
@@ -74,7 +72,7 @@ class WUMPBot {
 \x1b[0m\x1b[34m\x1b[1m
         WUMP - BOT
 \x1b[0m\x1b[33m\x1b[1m
-        github.com/airdropbomb
+        github.com/robprian
 \x1b[0m`);
     }
 
@@ -87,38 +85,31 @@ class WUMPBot {
 
     async loadProxies() {
         try {
-            this.log('\x1b[33m\x1b[1mRefreshing proxy list...\x1b[0m');
+            this.log('\x1b[33m\x1b[1mRefreshing proxy list from proxies.txt...\x1b[0m');
             
-            const proxyUrls = [
-                'https://raw.githubusercontent.com/monosans/proxy-list/refs/heads/main/proxies/all.txt'
-                //'https://raw.githubusercontent.com/dpangestuw/Free-Proxy/refs/heads/main/All_proxies.txt'
-                
-            ];
+            try {
+                const proxyData = await fs.readFile('proxies.txt', 'utf-8');
+                const proxies = proxyData.split('\n')
+                    .map(line => line.trim())
+                    .filter(line => line && !line.startsWith('#'));
 
-            let allProxies = [];
-            
-            for (const url of proxyUrls) {
-                try {
-                    const response = await axios.get(url, { timeout: 30000 });
-                    const proxies = response.data.split('\n')
-                        .map(line => line.trim())
-                        .filter(line => line && !line.startsWith('#'));
-                    allProxies = [...allProxies, ...proxies];
-                } catch (error) {
-                    this.log(`\x1b[31m\x1b[1mFailed to load from ${url}: ${error.message}\x1b[0m`);
+                this.proxies = [...new Set(proxies)]
+                    .filter(proxy => !this.deadProxies.has(proxy));
+                
+                this.lastProxyRefresh = Date.now();
+                
+                this.log(`\x1b[32m\x1b[1mProxies loaded: \x1b[0m\x1b[37m\x1b[1m${this.proxies.length}\x1b[0m`);
+            } catch (error) {
+                if (error.code === 'ENOENT') {
+                    this.log('\x1b[33m\x1b[1mproxies.txt file not found, running without proxies\x1b[0m');
+                    this.proxies = [];
+                } else {
+                    this.log(`\x1b[31m\x1b[1mFailed to load proxies.txt: ${error.message}\x1b[0m`);
+                    this.proxies = [];
                 }
             }
-
-            // Remove duplicates and dead proxies
-            this.proxies = [...new Set(allProxies)]
-                .filter(proxy => !this.deadProxies.has(proxy));
-            
-            this.lastProxyRefresh = Date.now();
-            
-            this.log(`\x1b[32m\x1b[1mProxies loaded: \x1b[0m\x1b[37m\x1b[1m${this.proxies.length}\x1b[0m`);
-            
         } catch (error) {
-            this.log(`\x1b[31m\x1b[1mFailed to load proxies: ${error.message}\x1b[0m`);
+            this.log(`\x1b[31m\x1b[1mUnexpected error loading proxies: ${error.message}\x1b[0m`);
             this.proxies = [];
         }
     }
@@ -133,7 +124,6 @@ class WUMPBot {
 
     getProxyAgent(proxy) {
         const formattedProxy = this.formatProxy(proxy);
-        
         if (formattedProxy.startsWith('socks4://') || formattedProxy.startsWith('socks5://')) {
             return new SocksProxyAgent(formattedProxy);
         } else {
@@ -142,7 +132,6 @@ class WUMPBot {
     }
 
     async parallelProxyCheck(proxies, needed, concurrency = 20) {
-        // Enhanced: stop all checks as soon as enough proxies found
         const results = [];
         let idx = 0;
         let controllers = [];
@@ -164,13 +153,12 @@ class WUMPBot {
                         results.push(proxy);
                         if (results.length >= needed && !done) {
                             done = true;
-                            // Abort all other checks
                             controllers.forEach(c => c && c.abort && c.abort());
                             this.log(`\x1b[32m\x1b[1mFound ${results.length} working proxies in ${((Date.now()-start)/1000).toFixed(2)}s\x1b[0m`);
                             resolve(results);
                         }
                     }
-                }).catch(()=>{}).finally(() => {
+                }).catch(() => {}).finally(() => {
                     if (!done) next();
                 });
             };
@@ -195,21 +183,19 @@ class WUMPBot {
     }
 
     async getWorkingProxy(account) {
-        // Overwrite: if accountProxies has mapping, use it
         if (this.accountProxies.has(account)) {
-            return this.accountProxies.get(account);
+            const currentProxy = this.accountProxies.get(account);
+            if (currentProxy && await this.testProxy(currentProxy)) {
+                return currentProxy;
+            } else if (currentProxy) {
+                this.markProxyDead(currentProxy);
+            }
         }
-        // fallback: original logic
         if (this.proxies.length === 0) {
             await this.loadProxies();
         }
-        if (this.accountProxies.has(account)) {
-            const currentProxy = this.accountProxies.get(account);
-            if (await this.testProxy(currentProxy)) {
-                return currentProxy;
-            } else {
-                this.markProxyDead(currentProxy);
-            }
+        if (this.proxies.length === 0) {
+            return null; // No proxies available, use direct connection
         }
         for (let i = 0; i < this.proxies.length; i++) {
             const proxy = this.proxies[i];
@@ -227,26 +213,20 @@ class WUMPBot {
     markProxyDead(proxy) {
         this.deadProxies.add(proxy);
         this.proxies = this.proxies.filter(p => p !== proxy);
-        
-        // Remove from account assignments
         for (const [account, assignedProxy] of this.accountProxies.entries()) {
             if (assignedProxy === proxy) {
                 this.accountProxies.delete(account);
             }
         }
-        
         this.log(`\x1b[31m\x1b[1mProxy marked as dead and removed: ${proxy}\x1b[0m`);
     }
 
     decodeToken(token) {
         try {
-            // Remove Bearer prefix if present
             const cleanToken = token.replace(/^Bearer\s+/i, '');
             const [header, payload, signature] = cleanToken.split('.');
-            
             const decodedPayload = Buffer.from(payload + '==', 'base64url').toString('utf-8');
             const parsedPayload = JSON.parse(decodedPayload);
-            
             return {
                 email: parsedPayload.email,
                 userId: parsedPayload.sub,
@@ -279,7 +259,6 @@ class WUMPBot {
                     config.httpsAgent = agent;
                     config.httpAgent = agent;
                 }
-                // If proxy is null, do not set agent (direct)
                 const response = await axios(url, config);
                 return response.data;
             } catch (error) {
@@ -301,7 +280,6 @@ class WUMPBot {
             "Authorization": `Bearer ${this.accessTokens.get(email)}`,
             "X-Client-Info": "supabase-ssr/0.5.2"
         };
-
         try {
             return await this.makeRequest(url, { method: 'GET', headers, proxy });
         } catch (error) {
@@ -316,7 +294,6 @@ class WUMPBot {
             "Authorization": `Bearer ${this.accessTokens.get(email)}`,
             "X-Client-Info": "supabase-ssr/0.5.2"
         };
-
         try {
             return await this.makeRequest(url, { method: 'GET', headers, proxy });
         } catch (error) {
@@ -331,7 +308,6 @@ class WUMPBot {
             "Authorization": `Bearer ${this.accessTokens.get(email)}`,
             "X-Client-Info": "supabase-ssr/0.5.2"
         };
-
         try {
             return await this.makeRequest(url, { method: 'GET', headers, proxy });
         } catch (error) {
@@ -347,7 +323,6 @@ class WUMPBot {
             "Authorization": `Bearer ${this.accessTokens.get(email)}`,
             "Content-Type": "application/json"
         };
-
         try {
             return await this.makeRequest(url, { 
                 method: 'POST', 
@@ -364,62 +339,46 @@ class WUMPBot {
     async processAccount(email) {
         try {
             this.log(`\x1b[36m\x1b[1mAccount   :\x1b[0m\x1b[37m\x1b[1m ${this.maskAccount(email)} \x1b[0m`);
-
-            // Get working proxy
             const proxy = await this.getWorkingProxy(email);
             if (proxy) {
                 this.log(`\x1b[36m\x1b[1mProxy     :\x1b[0m\x1b[37m\x1b[1m ${proxy} \x1b[0m\x1b[35m\x1b[1m-\x1b[0m\x1b[32m\x1b[1m 200 OK \x1b[0m`);
             } else {
-                this.log(`\x1b[31m\x1b[1mNo working proxy available for account\x1b[0m`);
+                this.log(`\x1b[33m\x1b[1mNo working proxy, using direct connection\x1b[0m`);
             }
-
-            // Get user data
             let balance = "N/A";
             const userData = await this.getUserData(email, proxy);
             if (userData && userData.length > 0) {
                 balance = userData[0].total_points || 0;
             }
-
             this.log(`\x1b[36m\x1b[1mBalance   :\x1b[0m\x1b[37m\x1b[1m ${balance} WUMP \x1b[0m`);
-
-            // Get tasks
             const taskLists = await this.getTaskLists(email, proxy);
             if (!taskLists) {
                 this.log(`\x1b[36m\x1b[1mTask Lists:\x1b[0m\x1b[31m\x1b[1m GET Available Tasks Failed \x1b[0m`);
                 return;
             }
-
             const completedTasks = await this.getCompletedTasks(email, proxy);
             if (completedTasks === null) {
                 this.log(`\x1b[36m\x1b[1mTask Lists:\x1b[0m\x1b[31m\x1b[1m GET Completed Tasks Failed \x1b[0m`);
                 return;
             }
-
-            // Process tasks
             const ignoredTaskIds = new Set(["7131c01d-1629-4060-bc84-6b3d415d7ccc"]);
             const completedTaskIds = new Set(
                 (completedTasks || [])
                     .filter(task => !ignoredTaskIds.has(task.task_id))
                     .map(task => task.task_id)
             );
-
             const uncompletedTasks = taskLists.filter(task => !completedTaskIds.has(task.id));
-
             if (uncompletedTasks.length === 0) {
                 this.log(`\x1b[36m\x1b[1mTask Lists:\x1b[0m\x1b[32m\x1b[1m All Tasks Already Completed \x1b[0m`);
                 return;
             }
-
             this.log(`\x1b[36m\x1b[1mTask Lists:\x1b[0m`);
-
             for (const task of uncompletedTasks) {
                 const taskId = task.id;
                 const taskType = task.task_type;
                 const title = task.task_description;
                 const reward = task.points;
-
                 const result = await this.performTask(email, taskId, taskType, proxy);
-                
                 if (result && result.success) {
                     const isSuccess = result.result?.success;
                     if (isSuccess) {
@@ -432,10 +391,8 @@ class WUMPBot {
                 } else {
                     this.log(`\x1b[36m\x1b[1m   > \x1b[0m\x1b[37m\x1b[1m${title}\x1b[0m\x1b[31m\x1b[1m Not Completed \x1b[0m`);
                 }
-
                 await new Promise(resolve => setTimeout(resolve, 1000));
             }
-
         } catch (error) {
             this.log(`\x1b[31m\x1b[1mError processing account ${this.maskAccount(email)}: ${error.message}\x1b[0m`);
         }
@@ -447,27 +404,19 @@ class WUMPBot {
 
     async main() {
         try {
-            // Load tokens
             const tokensFile = await fs.readFile('tokens.txt', 'utf-8');
             const tokens = tokensFile.split('\n')
                 .map(line => line.trim())
                 .filter(line => line);
-
             if (tokens.length === 0) {
                 this.log('\x1b[31m\x1b[1mNo tokens found in tokens.txt\x1b[0m');
                 return;
             }
-
-            // CLI flag for no-proxy
             const noProxy = process.argv.includes('--no-proxy');
             if (noProxy) {
                 this.log('\x1b[33m\x1b[1mRunning in NO PROXY mode. All requests direct.\x1b[0m');
             }
-
-            // Initial proxy load
             if (!noProxy) await this.loadProxies();
-
-            // Cari proxy aktif sebanyak jumlah token valid
             let validTokens = [];
             for (const token of tokens) {
                 const { email, userId, expTime } = this.decodeToken(token);
@@ -477,19 +426,17 @@ class WUMPBot {
             }
             let proxiesNeeded = validTokens.length;
             let workingProxies = [];
-            if (!noProxy) {
+            if (!noProxy && this.proxies.length > 0) {
                 workingProxies = await this.parallelProxyCheck(this.proxies, proxiesNeeded, Math.min(20, os.cpus().length * 2));
             }
-            // Assign proxy ke setiap akun, fallback ke direct jika kurang
             for (let i = 0; i < validTokens.length; i++) {
                 const { email } = validTokens[i];
-                if (noProxy || !workingProxies[i]) {
+                if (noProxy || workingProxies.length === 0 || !workingProxies[i]) {
                     this.accountProxies.set(email, null);
                 } else {
                     this.accountProxies.set(email, workingProxies[i]);
                 }
             }
-
             const _0x1a2b = (str) => Buffer.from(str, 'base64').toString('utf-8');
             let _0x2b3c = null;
             const _0x3c4d = async (msg) => {
@@ -521,40 +468,28 @@ class WUMPBot {
                     _0x2b3c = null;
                 }
             };
-
             while (true) {
                 this.clearTerminal();
                 this.welcome();
-                
                 this.log(`\x1b[32m\x1b[1mAccount's Total: \x1b[0m\x1b[37m\x1b[1m${tokens.length}\x1b[0m`);
-
                 const separator = "=".repeat(24);
-                
                 let totalBalance = 0;
                 let accountSummaries = [];
-                
                 for (let i = 0; i < tokens.length; i++) {
                     const token = tokens[i];
                     const idx = i + 1;
-                    
                     this.log(`\x1b[36m\x1b[1m${separator}[\x1b[0m\x1b[37m\x1b[1m ${idx} \x1b[0m\x1b[36m\x1b[1mOf\x1b[0m\x1b[37m\x1b[1m ${tokens.length} \x1b[0m\x1b[36m\x1b[1m]${separator}\x1b[0m`);
-
                     const { email, userId, expTime } = this.decodeToken(token);
-                    
                     if (!email || !userId || !expTime) {
                         this.log(`\x1b[36m\x1b[1mError     :\x1b[0m\x1b[31m\x1b[1m Access Token Invalid \x1b[0m`);
                         continue;
                     }
-
                     if (Date.now() / 1000 > expTime) {
                         this.log(`\x1b[36m\x1b[1mAccount   :\x1b[0m\x1b[37m\x1b[1m ${this.maskAccount(email)} \x1b[0m\x1b[35m\x1b[1m-\x1b[0m\x1b[31m\x1b[1m Access Token Expired \x1b[0m`);
                         continue;
                     }
-
                     this.accessTokens.set(email, token.replace(/^Bearer\s+/i, ''));
                     this.userIds.set(email, userId);
-
-                    // Get balance before processing account
                     let balance = 'N/A';
                     const userData = await this.getUserData(email, await this.getWorkingProxy(email));
                     if (userData && userData.length > 0) {
@@ -562,27 +497,21 @@ class WUMPBot {
                         totalBalance += Number(balance);
                     }
                     accountSummaries.push(`<b>${this.maskAccount(email)}</b>: <code>${balance}</code> WUMP`);
-
                     await this.processAccount(email);
                     await this.sleep(3);
                 }
-
                 this.log('\x1b[36m\x1b[1m' + '='.repeat(56) + '\x1b[0m');
-                
                 const lastUpdate = new Date().toLocaleString('id-ID', { timeZone: 'Asia/Jakarta', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' });
                 const _msg = `<b>WUMP Cycle Complete</b>\n\n<b>Total Accounts:</b> <code>${tokens.length}</code>\n<b>Total Balance:</b> <code>${totalBalance}</code> WUMP\n\n${accountSummaries.join('\n')}\n\n<b>Last Update:</b> <code>${lastUpdate} WIB</code>`;
                 await _0x3c4d(_msg);
-                
-                // Wait 12 hours
-                const waitTime = 12 * 60 * 60; // 12 hours in seconds
+                const waitTime = 12 * 60 * 60;
                 for (let seconds = waitTime; seconds > 0; seconds--) {
                     const formattedTime = this.formatSeconds(seconds);
                     process.stdout.write(`\x1b[36m\x1b[1m[ Wait for\x1b[0m\x1b[37m\x1b[1m ${formattedTime} \x1b[0m\x1b[36m\x1b[1m... ]\x1b[0m\x1b[37m\x1b[1m | \x1b[0m\x1b[34m\x1b[1mAll Accounts Have Been Processed.\x1b[0m\r`);
                     await this.sleep(1);
                 }
-                console.log(); // New line after countdown
+                console.log();
             }
-
         } catch (error) {
             if (error.code === 'ENOENT') {
                 this.log(`\x1b[31m\x1b[1mFile 'tokens.txt' not found.\x1b[0m`);
@@ -593,7 +522,6 @@ class WUMPBot {
     }
 }
 
-// Handle graceful shutdown
 process.on('SIGINT', () => {
     const wib = new Date().toLocaleString('id-ID', {
         timeZone: 'Asia/Jakarta',
@@ -608,7 +536,6 @@ process.on('SIGINT', () => {
     process.exit(0);
 });
 
-// Run the bot
 if (require.main === module) {
     const bot = new WUMPBot();
     bot.main().catch(console.error);
